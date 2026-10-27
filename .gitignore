@@ -1,0 +1,16 @@
+# Compiled files
+terminator
+*.o
+*.out
+
+# Temporary editor files
+*.swp
+*.swo
+*~
+
+# Test output files
+error.txt
+output.txt
+
+# VS Code
+.vscode/
