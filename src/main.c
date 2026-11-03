@@ -1,9 +1,9 @@
-
 #define _POSIX_C_SOURCE 200809L
 
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <X11/Xutil.h>
+#include <X11/Xatom.h>
 #include <pthread.h>
 #include <poll.h>
 #include <unistd.h>
@@ -29,6 +29,15 @@ static Atom wm_delete;
 static int screen;
 static int width = 850;
 static int height = 550;
+
+/* X11 clipboard and output-line selection. */
+static Atom clipboard_atom, utf8_atom, clipboard_property, targets_atom;
+static char copied_text[32768];
+int selection_start = -1;
+int selection_end = -1;
+int selection_tab = -1;
+static int mouse_selecting = 0;
+
 
 /* Read by gui.c to display the search prompt. */
 int history_search_mode = 0;
@@ -391,6 +400,132 @@ static void handle_search_key(
     notify_gui();
 }
 
+
+/* Map a mouse Y position to a visible output line. */
+static int output_line_at_y(Tab *t, int y)
+{
+    int top = 82, bottom = height - 68;
+    if (y < top - LINE_HEIGHT || y >= bottom)
+        return -1;
+    int visible = (bottom - top) / LINE_HEIGHT;
+    if (visible < 1) visible = 1;
+    int end = t->line_count - t->scroll;
+    if (end < 0) end = 0;
+    int start = end - visible;
+    if (start < 0) start = 0;
+    int index = start + (y - (top - LINE_HEIGHT)) / LINE_HEIGHT;
+    return index >= start && index < end ? index : -1;
+}
+
+static void copy_selected_output(void)
+{
+    if (tab_count <= 0 || selection_tab != active ||
+        selection_start < 0 || selection_end < 0)
+        return;
+
+    Tab *t = tabs[active];
+    pthread_mutex_lock(&t->lock);
+    int first = selection_start < selection_end ? selection_start : selection_end;
+    int last = selection_start > selection_end ? selection_start : selection_end;
+    size_t used = 0;
+    copied_text[0] = '\0';
+    for (int i = first; i <= last && i < t->line_count; ++i)
+    {
+        if (i < 0) continue;
+        size_t len = strlen(t->lines[i]);
+        if (used + len + 2 > sizeof(copied_text)) break;
+        memcpy(copied_text + used, t->lines[i], len);
+        used += len;
+        copied_text[used++] = '\n';
+        copied_text[used] = '\0';
+    }
+    pthread_mutex_unlock(&t->lock);
+    if (used)
+    {
+        XSetSelectionOwner(display, clipboard_atom, window, CurrentTime);
+        XFlush(display);
+    }
+}
+
+static void request_clipboard_paste(void)
+{
+    XConvertSelection(display, clipboard_atom, utf8_atom,
+                      clipboard_property, window, CurrentTime);
+    XFlush(display);
+}
+
+static void handle_selection_request(XSelectionRequestEvent *req)
+{
+    XEvent reply = {0};
+    reply.xselection.type = SelectionNotify;
+    reply.xselection.display = req->display;
+    reply.xselection.requestor = req->requestor;
+    reply.xselection.selection = req->selection;
+    reply.xselection.target = req->target;
+    reply.xselection.time = req->time;
+    reply.xselection.property = None;
+    Atom property = req->property == None ? req->target : req->property;
+
+    if (req->target == targets_atom)
+    {
+        Atom targets[] = {targets_atom, utf8_atom, XA_STRING};
+        XChangeProperty(display, req->requestor, property,
+                        XA_ATOM, 32, PropModeReplace,
+                        (unsigned char *)targets, 3);
+        reply.xselection.property = property;
+    }
+    else if (req->target == utf8_atom || req->target == XA_STRING)
+    {
+        XChangeProperty(display, req->requestor, property,
+                        req->target, 8, PropModeReplace,
+                        (unsigned char *)copied_text,
+                        (int)strlen(copied_text));
+        reply.xselection.property = property;
+    }
+    XSendEvent(display, req->requestor, False, 0, &reply);
+    XFlush(display);
+}
+
+static void handle_selection_notify(XSelectionEvent *ev)
+{
+    if (tab_count <= 0 || ev->selection != clipboard_atom) return;
+    if (ev->property == None)
+    {
+        /* Some older X11 apps only support STRING. */
+        if (ev->target == utf8_atom)
+            XConvertSelection(display, clipboard_atom, XA_STRING,
+                              clipboard_property, window, CurrentTime);
+        return;
+    }
+    Atom type;
+    int format;
+    unsigned long count, remaining;
+    unsigned char *data = NULL;
+    if (XGetWindowProperty(display, window, clipboard_property,
+                           0, INPUT_LEN, True, AnyPropertyType,
+                           &type, &format, &count, &remaining,
+                           &data) != Success)
+        return;
+    if (data && format == 8)
+    {
+        Tab *t = tabs[active];
+        pthread_mutex_lock(&t->lock);
+        for (unsigned long i = 0; i < count; ++i)
+        {
+            unsigned char c = data[i];
+            if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            if (c < 32 || t->input_len >= INPUT_LEN - 1) continue;
+            memmove(t->input + t->cursor + 1,
+                    t->input + t->cursor,
+                    (size_t)(t->input_len - t->cursor + 1));
+            t->input[t->cursor++] = (char)c;
+            t->input_len++;
+        }
+        pthread_mutex_unlock(&t->lock);
+    }
+    if (data) XFree(data);
+}
+
 static void handle_key(XKeyEvent *e)
 {
     if (tab_count <= 0)
@@ -417,6 +552,38 @@ static void handle_key(XKeyEvent *e)
         return;
     }
 
+    if (ctrl && (sym == XK_d || sym == XK_D))
+    {
+        int empty;
+        pthread_mutex_lock(&t->lock);
+        empty = (t->input_len == 0);
+        pthread_mutex_unlock(&t->lock);
+        if (empty)
+        {
+            /* Hide the window before potentially blocking tab cleanup. */
+            if (tab_count == 1)
+            {
+                XUnmapWindow(display, window);
+                XFlush(display);
+            }
+            if (selection_tab == active)
+                selection_start = selection_end = selection_tab = -1;
+            close_active_tab();
+        }
+        return;
+    }
+
+    if (ctrl && shift && (sym == XK_C || sym == XK_c))
+    {
+        copy_selected_output();
+        return;
+    }
+    if (ctrl && shift && (sym == XK_V || sym == XK_v))
+    {
+        request_clipboard_paste();
+        return;
+    }
+
     if (ctrl && (sym == XK_r || sym == XK_R))
     {
         begin_search(t);
@@ -438,6 +605,11 @@ static void handle_key(XKeyEvent *e)
     if (ctrl && shift &&
         (sym == XK_W || sym == XK_w))
     {
+        if (tab_count == 1)
+        {
+            XUnmapWindow(display, window);
+            XFlush(display);
+        }
         close_active_tab();
         return;
     }
@@ -724,6 +896,10 @@ int main(int argc, char **argv)
     }
 
     screen = DefaultScreen(display);
+    clipboard_atom = XInternAtom(display, "CLIPBOARD", False);
+    utf8_atom = XInternAtom(display, "UTF8_STRING", False);
+    clipboard_property = XInternAtom(display, "TERMINATOR_PASTE", False);
+    targets_atom = XInternAtom(display, "TARGETS", False);
 
     window = XCreateSimpleWindow(
         display,
@@ -739,7 +915,8 @@ int main(int argc, char **argv)
     XSelectInput(
         display, window,
         ExposureMask | KeyPressMask |
-        StructureNotifyMask | ButtonPressMask
+        StructureNotifyMask | ButtonPressMask |
+        ButtonReleaseMask | PointerMotionMask
     );
 
     wm_delete =
@@ -814,7 +991,7 @@ int main(int argc, char **argv)
 
     int done = 0;
 
-    while (!done)
+    while (!done && tab_count > 0)
     {
         while (XPending(display))
         {
@@ -834,6 +1011,51 @@ int main(int argc, char **argv)
             else if (e.type == KeyPress)
             {
                 handle_key(&e.xkey);
+                if (tab_count == 0) {
+                    done = 1;
+                    break;
+                }
+            }
+            else if (e.type == SelectionRequest)
+            {
+                handle_selection_request(&e.xselectionrequest);
+            }
+            else if (e.type == SelectionNotify)
+            {
+                handle_selection_notify(&e.xselection);
+            }
+            else if (e.type == ButtonPress &&
+                     e.xbutton.button == Button1 && tab_count > 0)
+            {
+                Tab *t = tabs[active];
+                pthread_mutex_lock(&t->lock);
+                selection_start = output_line_at_y(t, e.xbutton.y);
+                selection_end = selection_start;
+                selection_tab = active;
+                mouse_selecting = (selection_start >= 0);
+                pthread_mutex_unlock(&t->lock);
+            }
+            else if (e.type == MotionNotify && mouse_selecting &&
+                     tab_count > 0 && selection_tab == active)
+            {
+                Tab *t = tabs[active];
+                pthread_mutex_lock(&t->lock);
+                int line = output_line_at_y(t, e.xmotion.y);
+                if (line >= 0) selection_end = line;
+                pthread_mutex_unlock(&t->lock);
+            }
+            else if (e.type == ButtonRelease &&
+                     e.xbutton.button == Button1)
+            {
+                mouse_selecting = 0;
+                if (tab_count > 0 && selection_tab == active)
+                {
+                    Tab *t = tabs[active];
+                    pthread_mutex_lock(&t->lock);
+                    int line = output_line_at_y(t, e.xbutton.y);
+                    if (line >= 0) selection_end = line;
+                    pthread_mutex_unlock(&t->lock);
+                }
             }
             else if (e.type == ButtonPress &&
                      (e.xbutton.button == 4 ||

@@ -25,7 +25,6 @@ int create_tab(void) {
     t->msg_read = -1;
     t->cmd_write = -1;
 
-    /* Start each tab in the directory from which Terminator was launched. */
     if (!getcwd(t->cwd, sizeof(t->cwd))) {
         perror("getcwd");
         pthread_cond_destroy(&t->ready);
@@ -66,7 +65,6 @@ int create_tab(void) {
             }
             if (wake_pipe[0] >= 0) close(wake_pipe[0]);
             if (wake_pipe[1] >= 0) close(wake_pipe[1]);
-            /* Child never calls X11. */
             shell_process(to_child[0], from_child[1]);
         }
         close(to_child[0]); close(from_child[1]);
@@ -109,10 +107,20 @@ void destroy_tab(Tab *t) {
 }
 
 void close_active_tab(void) {
+    if (tab_count <= 0) return;
+
     Tab *t = tabs[active];
-    for (int i = active; i < tab_count - 1; i++) tabs[i] = tabs[i + 1];
+    for (int i = active; i < tab_count - 1; i++)
+        tabs[i] = tabs[i + 1];
+
     tab_count--;
-    if (active >= tab_count && tab_count) active = tab_count - 1;
+    if (tab_count > 0) {
+        if (active >= tab_count)
+            active = tab_count - 1;
+    } else {
+        active = 0;
+    }
+
     destroy_tab(t);
-    if (!tab_count) create_tab();
+    /* Do not create a replacement when the last tab closes. */
 }
