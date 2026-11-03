@@ -11,7 +11,7 @@
 #define MAX_LINES 600
 #define LINE_LEN 512
 #define INPUT_LEN 1024
-#define LINE_HEIGHT 18
+#define LINE_HEIGHT 30
 
 typedef struct {
     pthread_t thread;

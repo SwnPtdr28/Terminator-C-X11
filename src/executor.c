@@ -16,7 +16,8 @@ void add_line_locked(Tab *t,const char *s){
     snprintf(t->lines[t->line_count++],LINE_LEN,"%s",s);t->scroll=0;
 }
 void append_text_locked(Tab *t,const char *s){
-    if(!t->line_count)add_line_locked(t,"");
+    if (!t->line_count)
+    add_line_locked(t, "");
     for(const unsigned char *p=(const unsigned char*)s;*p;p++){
         if(*p=='\n')add_line_locked(t,"");
         else if(*p=='\r')t->lines[t->line_count-1][0]=0;
