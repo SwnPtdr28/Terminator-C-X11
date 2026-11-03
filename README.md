@@ -22,10 +22,10 @@ Open the folder using `code .` from WSL. `make` compiles the full program. Run `
 4. **Redirection:** `<`, `>`, `>>` supported on external commands and pipelines; not full shell fd-redirection syntax.
 5. **Pipelines:** `cmd1 | cmd2 | ...` using N-1 pipes and N child processes. Simple pipelines and redirection are supported; pipeline built-ins are limited.
 6. **multiWatch:** prototype `multiWatch ["date", "echo hello"]` executes commands concurrently, polls pipes, repeats after 2 seconds and handles Ctrl+C in common cases. Output format and cancellation edge cases require further work.
-7. **Keyboard controls:** Ctrl+T, Ctrl+Tab, Ctrl+Shift+W, Ctrl+A/E/U/K/W/L, arrows, Backspace/Delete, Up/Down, basic Tab completion. **Configurable persisted hotkeys and X11 copy/paste are not implemented.**
+7. **Keyboard controls:** Ctrl+T, Ctrl+Tab, Ctrl+Shift+W, Ctrl+A/E/U/K/W/L, arrows, Backspace/Delete, Up/Down, basic Tab completion. **Ctrl+D and basic X11 clipboard copy/paste are implemented; copying currently uses whole-line output selection. Configurable persisted hotkeys are not implemented.**
 8. **Signals and jobs:** foreground process-group Ctrl+C/Z, `cmd &`, `jobs`, `fg`, `bg` prototypes. **Not complete POSIX job control**: no controlling-terminal transfer, background pipeline tracking and child cleanup need improvement.
 
-Tasks 9–11 are **not complete**: shared history uses an advisory-file-locked persistent file rather than required process-shared semaphore/shared-memory design; Ctrl+R search is absent; Tab completion is basic; a custom script interpreter is absent.
+Tasks 9–11 are **partially implemented or incomplete**: shared history uses an advisory-file-locked persistent file rather than required process-shared semaphore/shared-memory design; Ctrl+R history search is implemented in a basic form; Tab completion is basic; a custom script interpreter is absent.
 
 ## Quick manual tests
 
